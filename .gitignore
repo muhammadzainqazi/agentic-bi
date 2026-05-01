@@ -1,0 +1,19 @@
+# Environment
+.env
+*.env
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Data
+data/
+output/
+
+# VS Code
+.vscode/
+
+# Windows
+Thumbs.db
+desktop.ini
