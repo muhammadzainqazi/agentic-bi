@@ -1,19 +1,28 @@
-# Environment
-.env
-*.env
-
 # Python
-venv/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 
-# Data
-data/
-output/
+# Virtual environment
+venv/
+.env/
+.env.*
 
-# VS Code
-.vscode/
+# Streamlit
+.streamlit/
 
-# Windows
+# Secrets
+*.env
+update_env.py
+
+# OS files
+.DS_Store
 Thumbs.db
-desktop.ini
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
