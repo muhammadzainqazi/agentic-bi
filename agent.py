@@ -23,9 +23,6 @@ NPX = r"C:\Program Files\nodejs\npx.cmd"
 # ── MCP Helper ───────────────────────────────────────────────
 
 def _get_pbi_connection(preferred_conn_string: str = None):
-    """Auto-detects running Power BI Desktop instance and connects.
-    If preferred_conn_string is provided, connects to that specific file.
-    Otherwise connects to the first detected instance."""
     proc = subprocess.Popen(
         [NPX, "-y", "@microsoft/powerbi-modeling-mcp@latest", "--start"],
         stdin=subprocess.PIPE,
@@ -57,7 +54,6 @@ def _get_pbi_connection(preferred_conn_string: str = None):
         except:
             return {}
 
-    # Initialize
     send(proc, {
         "jsonrpc": "2.0", "id": 1, "method": "initialize",
         "params": {
@@ -73,7 +69,6 @@ def _get_pbi_connection(preferred_conn_string: str = None):
     }) + "\n")
     proc.stdin.flush()
 
-    # Use preferred connection or auto-detect
     if preferred_conn_string:
         live_conn_string = preferred_conn_string
     else:
@@ -87,14 +82,11 @@ def _get_pbi_connection(preferred_conn_string: str = None):
         })
         result = get_text(resp)
         instances = result.get("data", [])
-
         if not instances:
             proc.kill()
             return None, None, None
-
         live_conn_string = instances[0].get("connectionString")
 
-    # Connect
     resp = send(proc, {
         "jsonrpc": "2.0", "id": 3,
         "method": "tools/call",
@@ -122,14 +114,13 @@ def get_powerbi_schema(connection_string: str = "") -> str:
     """Gets the schema of the live Power BI Desktop semantic model.
     Returns all tables and columns currently loaded in the open PBIX file.
     connection_string: optional — pass if multiple PBI files are open.
-    Always call this first before writing any DAX query."""
+    ALWAYS call this first before writing any DAX query."""
     try:
         conn_name, proc, send = _get_pbi_connection(
             preferred_conn_string=connection_string if connection_string else None
         )
-
         if not conn_name:
-            return json.dumps({"error": "Power BI Desktop not found."})
+            return json.dumps({"error": "Power BI Desktop not found. Please open a .pbix file."})
 
         def get_text(resp):
             content = resp.get("result", {}).get("content", [{}])
@@ -139,7 +130,6 @@ def get_powerbi_schema(connection_string: str = "") -> str:
             except:
                 return {}
 
-        # List all tables
         resp = send(proc, {
             "jsonrpc": "2.0", "id": 10,
             "method": "tools/call",
@@ -159,7 +149,6 @@ def get_powerbi_schema(connection_string: str = "") -> str:
             tname = table.get("name", "")
             if tname.startswith("DateTableTemplate") or tname.startswith("LocalDateTable"):
                 continue
-
             resp = send(proc, {
                 "jsonrpc": "2.0", "id": 11,
                 "method": "tools/call",
@@ -188,21 +177,14 @@ def get_powerbi_schema(connection_string: str = "") -> str:
 @tool
 def query_powerbi_data(dax_query: str, connection_string: str = "") -> str:
     """Runs a DAX query against the live Power BI Desktop semantic model.
-    Use this instead of SQL — queries whatever is loaded in Power BI Desktop.
     connection_string: optional — pass if multiple PBI files are open.
-
-    DAX query examples:
-    - EVALUATE SUMMARIZECOLUMNS('dataset'[facility], "Total Claims", SUM('dataset'[claims_count]))
-    - EVALUATE SUMMARIZECOLUMNS('dataset'[specialty], "Approved", SUM('dataset'[approved_claims]))
-    - EVALUATE ROW("Total", SUM('dataset'[claims_count]))
-
     Always use EVALUATE at the start.
-    Always use SUMMARIZECOLUMNS for grouped results."""
+    Always use SUMMARIZECOLUMNS for grouped results.
+    Use EXACTLY the table/column names from get_powerbi_schema()."""
     try:
         conn_name, proc, send = _get_pbi_connection(
             preferred_conn_string=connection_string if connection_string else None
         )
-
         if not conn_name:
             return json.dumps({"error": "Power BI Desktop not found."})
 
@@ -241,9 +223,11 @@ def query_powerbi_data(dax_query: str, connection_string: str = "") -> str:
 
 @tool
 def summarize_results(data_json: str, question: str) -> str:
-    """Takes query results and returns plain English insights."""
+    """Takes actual query results JSON and returns plain English insights.
+    data_json must be the real JSON string returned by query_powerbi_data."""
     try:
-        rows = json.loads(data_json)
+        parsed = json.loads(data_json)
+        rows = parsed.get("data", parsed) if isinstance(parsed, dict) else parsed
         if not rows or "error" in str(rows):
             return "No data returned or query failed."
         df = pd.DataFrame(rows)
@@ -263,10 +247,12 @@ def summarize_results(data_json: str, question: str) -> str:
 @tool
 def generate_report(data_json: str, question: str, chart_type: str = "bar") -> str:
     """Generates a standalone HTML report with chart and data table.
+    data_json must be the real JSON string returned by query_powerbi_data.
     chart_type: bar, line, pie, horizontal_bar"""
     try:
         os.makedirs("output", exist_ok=True)
-        rows = json.loads(data_json)
+        parsed = json.loads(data_json)
+        rows = parsed.get("data", parsed) if isinstance(parsed, dict) else parsed
         df = pd.DataFrame(rows)
         cols = df.columns.tolist()
         label_col = cols[0]
@@ -356,19 +342,13 @@ new Chart(document.getElementById('chart').getContext('2d'), {{
 @tool
 def create_powerbi_semantic_model(measures_json: str, connection_string: str = "") -> str:
     """Creates DAX measures in the open Power BI Desktop file.
-    measures_json is a JSON array of measure objects with:
-    - name: measure name
-    - expression: DAX expression
-    - formatString: optional e.g. '#,##0' or '0.00%'
-    - description: optional
+    measures_json: JSON array of measures with name, expression, formatString, description.
     connection_string: optional — pass if multiple PBI files are open.
-    Example: [{"name": "Total Claims", "expression": "SUM('dataset'[claims_count])", "formatString": "#,##0"}]
-    """
+    Example: [{"name": "Total Claims", "expression": "SUM('dataset'[claims_count])", "formatString": "#,##0"}]"""
     try:
         conn_name, proc, send = _get_pbi_connection(
             preferred_conn_string=connection_string if connection_string else None
         )
-
         if not conn_name:
             return json.dumps({
                 "success": False,
@@ -385,9 +365,11 @@ def create_powerbi_semantic_model(measures_json: str, connection_string: str = "
 
         measures = json.loads(measures_json)
 
-        # Get table name from schema if not provided
-        schema_result = json.loads(get_powerbi_schema(connection_string))
-        tables = [k for k in schema_result.keys() if not k.startswith("Date")]
+        # Auto-detect table name from schema
+        schema_raw = get_powerbi_schema(connection_string)
+        schema_result = json.loads(schema_raw)
+        tables = [k for k in schema_result.keys()
+                  if not k.startswith("Date") and not k.startswith("Local")]
         table_name = tables[0] if tables else "dataset"
 
         for m in measures:
@@ -443,7 +425,7 @@ class State(TypedDict):
     model: str
 
 # ── LLM ─────────────────────────────────────────────────────
-def get_llm(model: str = "llama-3.1-8b-instant"):
+def get_llm(model: str = "llama-3.3-70b-versatile"):
     return ChatGroq(
         model=model,
         api_key=os.getenv("GROQ_API_KEY")
@@ -453,40 +435,40 @@ def get_llm(model: str = "llama-3.1-8b-instant"):
 def build_system_prompt(thread_id: str) -> str:
     ctx = get_context(thread_id)
     history = get_history(thread_id, limit=3)
-
     selected_conn = os.getenv("SELECTED_PBI_CONN", "")
 
-    base = """You are an expert BI analyst agent. You query live data directly
-from whatever is open in Power BI Desktop.
+    base = """You are an expert BI analyst agent that queries live Power BI Desktop data.
 
-ALWAYS follow these steps for every question:
-1. Call get_powerbi_schema() to discover tables and columns in the open PBIX
-2. Call query_powerbi_data() with a DAX query based on what you found
-3. Call summarize_results() to produce plain English insights
-4. Call generate_report() to create an HTML report
+STRICT SEQUENTIAL RULES — no exceptions:
+- Call ONE tool at a time, wait for its result, then call the next
+- NEVER call multiple tools in the same response
+- NEVER use placeholder values — always pass actual results from previous tool calls
+
+STEPS for every question:
+Step 1: Call get_powerbi_schema() — wait for real schema result
+Step 2: Call query_powerbi_data() using REAL table/column names from Step 1 — wait for result
+Step 3: Call summarize_results() passing the ACTUAL JSON string from Step 2 — wait
+Step 4: Call generate_report() passing the ACTUAL JSON string from Step 2 — done
 
 CRITICAL DAX rules:
 - Always start with EVALUATE
-- Use SUMMARIZECOLUMNS for grouped results:
-  EVALUATE SUMMARIZECOLUMNS('TableName'[Column], "Measure Name", SUM('TableName'[NumericCol]))
-- Use ROW for single values:
-  EVALUATE ROW("Total", SUM('TableName'[Column]))
-- Use EXACTLY the table and column names returned by get_powerbi_schema()
-- If query_powerbi_data returns an error, read it carefully, fix the DAX and retry
+- Grouped results: EVALUATE SUMMARIZECOLUMNS('Table'[Col], "Label", SUM('Table'[NumCol]))
+- Single values: EVALUATE ROW("Label", SUM('Table'[Col]))
+- Use EXACTLY the table/column names from get_powerbi_schema() result
+- If DAX query fails, read the error, fix it, and retry
 
 Chart type: comparisons→horizontal_bar, trends→line, proportions→pie, default→bar
 
-When user asks to create measures in Power BI:
-- Call create_powerbi_semantic_model() with relevant measures
-- Use table/column names from get_powerbi_schema() in the DAX expressions"""
+For measure creation:
+- Call create_powerbi_semantic_model() with measures JSON array
+- Use table/column names from get_powerbi_schema() in expressions"""
 
     if selected_conn:
         base += f"""
 
 POWER BI CONNECTION:
-- User selected connection: {selected_conn}
-- Pass this as connection_string to get_powerbi_schema, query_powerbi_data,
-  and create_powerbi_semantic_model"""
+- Selected: {selected_conn}
+- Pass as connection_string to all PBI tool calls"""
 
     if ctx.get("last_question"):
         base += f"""
@@ -496,8 +478,8 @@ CONVERSATION CONTEXT:
 - Last DAX: {ctx.get('last_sql')}
 - Last filters: {ctx.get('last_filters') or 'none'}
 
-For follow-up questions (containing 'now', 'filter', 'same', 'that', 'also', 'only'):
-MODIFY the last DAX query instead of starting fresh."""
+For follow-up questions (now/filter/same/that/also/only):
+MODIFY the last DAX instead of starting fresh."""
 
     if history:
         base += "\n\nRECENT CONVERSATION:\n"
@@ -510,7 +492,7 @@ MODIFY the last DAX query instead of starting fresh."""
 def agent_node(state: State):
     msgs = state["messages"]
     thread_id = state.get("thread_id", "default")
-    model = state.get("model", "llama-3.1-8b-instant")
+    model = state.get("model", "llama-3.3-70b-versatile")
     llm_with_tools = get_llm(model)
     system = SystemMessage(content=build_system_prompt(thread_id))
     filtered = [m for m in msgs if not isinstance(m, SystemMessage)]

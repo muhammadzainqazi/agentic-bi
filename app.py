@@ -79,15 +79,14 @@ st.subheader("⚙️ Settings")
 
 # Model selector
 model_choice = st.selectbox(
-    "LLM Model",
+    "model",
     options=[
-        "llama-3.1-8b-instant",
         "llama-3.3-70b-versatile",
-        "llama3-70b-8192",
-        "mixtral-8x7b-32768"
+        "llama-3.1-8b-instant",
+        "mixtral-8x7b-32768",
     ],
     index=0,
-    help="Smaller models use fewer tokens but may be less accurate"
+    label_visibility="collapsed"
 )
 st.session_state.model_choice = model_choice
 
@@ -202,12 +201,13 @@ if question:
             try:
                 config = {"configurable": {"thread_id": st.session_state.thread_id}}
                 result = graph.invoke(
-                    {
-                        "messages": [HumanMessage(content=question)],
-                        "thread_id": st.session_state.thread_id
-                    },
+                             {
+                     "messages": [HumanMessage(content=question)],
+                     "thread_id": st.session_state.thread_id,
+                     "model": st.session_state.get("model_choice", "llama-3.1-8b-instant")
+                 },
                     config=config
-                )
+)
 
                 # Collect tools used + extract SQL and report path
                 tools_used = []
