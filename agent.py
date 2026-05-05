@@ -14,6 +14,9 @@ from typing import Annotated
 from typing_extensions import TypedDict
 import subprocess
 from memory import save_context, get_context, save_message, get_history
+from datasources import (query_source, get_source_schema,
+                         list_sources, register_source,
+                         auto_detect_sources)
 
 load_dotenv()
 
@@ -162,10 +165,18 @@ def get_powerbi_schema(connection_string: str = "") -> str:
                 }
             })
             col_result = get_text(resp)
-            cols = col_result.get("data", [])
+            raw = col_result.get("data", [])
+
+# API returns columns nested inside first item
+            if raw and isinstance(raw, list) and "columns" in raw[0]:
+             cols = raw[0].get("columns", [])
+            else:
+                cols = raw
+
             schema[tname] = [
-                {"name": c.get("name"), "dataType": c.get("dataType")}
-                for c in cols
+                 {"name": c.get("name"), "dataType": c.get("dataType")}
+            for c in cols
+            if c.get("name") and not c.get("isHidden", False)
             ]
 
         proc.kill()
@@ -408,14 +419,100 @@ def create_powerbi_semantic_model(measures_json: str, connection_string: str = "
 
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)})
+@tool
+def list_data_sources() -> str:
+    """Lists all registered data sources available to query.
+    Always call this first if the user mentions a specific dataset
+    or if Power BI Desktop is not open."""
+    try:
+        sources = list_sources()
+        result = []
+        for name, config in sources.items():
+            result.append({
+                "name": name,
+                "type": config.get("type"),
+                "description": config.get("description", ""),
+                "path": config.get("path", config.get("connection_string", ""))
+            })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+@tool
+def get_data_source_schema(source_name: str) -> str:
+    """Gets the schema of a registered data source.
+    source_name: name from list_data_sources()
+    Returns columns and data types."""
+    try:
+        schema = get_source_schema(source_name)
+        return json.dumps(schema, indent=2)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+@tool
+def query_data_source(source_name: str, sql: str) -> str:
+    """Queries a registered data source using SQL.
+    source_name: name from list_data_sources()
+    sql: SQL query — use FROM claims or FROM dataset as table placeholder,
+    the engine will replace it with the actual source automatically.
+
+    SQL rules:
+    - ALWAYS use GROUP BY with aggregate functions: SUM(), AVG(), COUNT()
+    - For ratios: SUM(col1) * 1.0 / NULLIF(SUM(col2), 0)
+    - If query fails, read error and fix SQL then retry"""
+    try:
+        df = query_source(source_name, sql)
+        df = df.round(4)
+        return json.dumps({
+            "success": True,
+            "data": df.to_dict(orient="records"),
+            "rows": len(df),
+            "columns": list(df.columns)
+        }, indent=2)
+    except Exception as e:
+        return json.dumps({
+            "error": str(e),
+            "tip": "Check SQL aggregation — wrap numeric columns in SUM()"
+        })
+
+@tool
+def register_data_source(name: str, source_type: str,
+                         path: str = "",
+                         connection_string: str = "",
+                         description: str = "") -> str:
+    """Registers a new data source so the agent can query it.
+    name: friendly name for the source
+    source_type: duckdb, csv, excel, sqlserver
+    path: file path for duckdb/csv/excel sources
+    connection_string: for SQL Server e.g.
+      'DRIVER={SQL Server};SERVER=myserver;DATABASE=mydb;UID=user;PWD=pass'
+    description: optional description"""
+    try:
+        kwargs = {"description": description}
+        if path:
+            kwargs["path"] = path
+        if connection_string:
+            kwargs["connection_string"] = connection_string
+        sources = register_source(name, source_type, **kwargs)
+        return json.dumps({
+            "success": True,
+            "message": f"Source '{name}' registered as {source_type}",
+            "all_sources": list(sources.keys())
+        })
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)})
 
 # ── All tools ────────────────────────────────────────────────
-ALL_TOOLS = [
+ALL_TOOLS =  [
     get_powerbi_schema,
     query_powerbi_data,
     summarize_results,
     generate_report,
-    create_powerbi_semantic_model
+    create_powerbi_semantic_model,
+    list_data_sources,
+    get_data_source_schema,
+    query_data_source,
+    register_data_source
 ]
 
 # ── State ────────────────────────────────────────────────────
@@ -437,31 +534,31 @@ def build_system_prompt(thread_id: str) -> str:
     history = get_history(thread_id, limit=3)
     selected_conn = os.getenv("SELECTED_PBI_CONN", "")
 
-    base = """You are an expert BI analyst agent that queries live Power BI Desktop data.
+    base ="""You are an expert BI analyst agent with two capabilities:
 
-STRICT SEQUENTIAL RULES — no exceptions:
-- Call ONE tool at a time, wait for its result, then call the next
-- NEVER call multiple tools in the same response
-- NEVER use placeholder values — always pass actual results from previous tool calls
+CAPABILITY 1 — DATA QUERIES (use DuckDB/local sources):
+For ANY data question, follow these steps ONE AT A TIME:
+Step 1: Call list_data_sources() to see available datasets
+Step 2: Call get_data_source_schema() with the source name to get columns
+Step 3: Call query_data_source() with correct SQL — wait for actual result
+Step 4: Call summarize_results() with the ACTUAL JSON from Step 3
+Step 5: Call generate_report() with the ACTUAL JSON from Step 3
 
-STEPS for every question:
-Step 1: Call get_powerbi_schema() — wait for real schema result
-Step 2: Call query_powerbi_data() using REAL table/column names from Step 1 — wait for result
-Step 3: Call summarize_results() passing the ACTUAL JSON string from Step 2 — wait
-Step 4: Call generate_report() passing the ACTUAL JSON string from Step 2 — done
+CAPABILITY 2 — POWER BI SEMANTIC MODEL (use MCP):
+Only when user explicitly asks to create measures, relationships, or model objects:
+Step 1: Call get_powerbi_schema() to check what's in the open PBIX
+Step 2: Call create_powerbi_semantic_model() with measures JSON array
 
-CRITICAL DAX rules:
-- Always start with EVALUATE
-- Grouped results: EVALUATE SUMMARIZECOLUMNS('Table'[Col], "Label", SUM('Table'[NumCol]))
-- Single values: EVALUATE ROW("Label", SUM('Table'[Col]))
-- Use EXACTLY the table/column names from get_powerbi_schema() result
-- If DAX query fails, read the error, fix it, and retry
+CRITICAL SQL rules for query_data_source:
+- Use FROM claims or FROM dataset as table placeholder
+- ALWAYS use GROUP BY with aggregate functions: SUM(), AVG(), COUNT()
+- For ratios: SUM(col1) * 1.0 / NULLIF(SUM(col2), 0)
+- If query fails, fix SQL and retry immediately
 
 Chart type: comparisons→horizontal_bar, trends→line, proportions→pie, default→bar
 
-For measure creation:
-- Call create_powerbi_semantic_model() with measures JSON array
-- Use table/column names from get_powerbi_schema() in expressions"""
+NEVER try to query Power BI for data — use list_data_sources and query_data_source instead.
+Power BI MCP is ONLY for creating measures and semantic model objects."""
 
     if selected_conn:
         base += f"""
